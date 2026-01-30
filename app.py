@@ -13,7 +13,7 @@ st.set_page_config(
 st.markdown("""
     <style>
         .block-container {padding-top: 1rem; padding-bottom: 0rem;}
-        div[data-testid="stMetricValue"] {font-size: 1.8rem;}
+        div[data-testid="stMetricValue"] {font-size: 1.6rem;} 
     </style>
 """, unsafe_allow_html=True)
 
@@ -51,11 +51,22 @@ def normalizar_status(texto):
     texto = texto.upper().strip()
     texto = texto.replace('Í', 'I').replace('É', 'E').replace('Ã', 'A').replace('Ó', 'O')
     
+    # 1. Concluído
     if any(x in texto for x in ['CONCLU', 'PAGO', 'APROV', 'OK']):
         return 'Concluído'
     
+    # 2. Recusado
     if any(x in texto for x in ['RECUS', 'CANCEL', 'NEGAD', 'DEVOL']):
         return 'Recusado'
+    
+    # 3. Em Andamento (CORRIGIDO: Agora está fora do 'if' anterior)
+    # Removi "EM" sozinho pois pode dar erro pegando palavras como "SEM", "TEM", etc.
+    palavras_andamento = [
+        'ANDAMENT', 'ANALISE', 'PENDEN', 'AGUARD', 
+        'ESTEIRA', 'DIGITA', 'IMPLANT'
+    ]
+    if any(x in texto for x in palavras_andamento):
+        return 'Em Andamento'
         
     return "Outros"
 
@@ -107,7 +118,7 @@ if uploaded_file:
         conn.execute("DELETE FROM vendas")
         df[required].to_sql('vendas', conn, if_exists='append', index=False)
         conn.close()
-        st.toast("Sucesso!", icon="✅")
+        st.toast("Sucesso! Status classificados.", icon="✅")
         
     except Exception as e:
         st.error(f"Erro: {e}")
@@ -127,12 +138,13 @@ if has_data:
     
     for i, produto in enumerate(produtos):
         with abas[i]:
-            # --- QUERY GERAL ---
+            # --- QUERY GERAL (CORRIGIDA: Adicionei a coluna EmAndamento) ---
             df_dash = pd.read_sql(f"""
                 SELECT 
                     equipe,
                     SUM(valor_entrada) as Volume,
                     SUM(CASE WHEN status = 'Concluído' THEN valor_entrada ELSE 0 END) as Concluido,
+                    SUM(CASE WHEN status = 'Em Andamento' THEN valor_entrada ELSE 0 END) as EmAndamento,
                     SUM(CASE WHEN status = 'Recusado' THEN valor_entrada ELSE 0 END) as Recusado
                 FROM vendas WHERE produto = '{produto}'
                 GROUP BY equipe
@@ -140,17 +152,24 @@ if has_data:
             
             total_vol = df_dash['Volume'].sum()
             total_conc = df_dash['Concluido'].sum()
+            total_and = df_dash['EmAndamento'].sum() 
             total_rec = df_dash['Recusado'].sum()
             
-            # --- KPIs ---
-            col1, col2, col3, col4 = st.columns(4)
+            # --- KPIs (5 colunas agora) ---
+            col1, col2, col3, col4, col5 = st.columns(5)
+            
             col1.metric("Volume Entrada", f"R$ {total_vol:,.2f}")
+            
             if total_vol > 0:
                 perc_conc = (total_conc / total_vol * 100)
+                perc_and = (total_and / total_vol * 100)
                 perc_rec = (total_rec / total_vol * 100)
-                col2.metric("Efetividade Global", f"{perc_conc:.2f}%", f"R$ {total_conc:,.2f}")
-                col3.metric("Taxa de Recusa", f"{perc_rec:.2f}%", f"R$ {total_rec:,.2f}", delta_color="inverse")
-                col4.download_button(
+                
+                col2.metric("Efetividade", f"{perc_conc:.2f}%", f"R$ {total_conc:,.2f}")
+                col3.metric("Em Andamento", f"{perc_and:.2f}%", f"R$ {total_and:,.2f}", delta_color="off")
+                col4.metric("Recusado", f"{perc_rec:.2f}%", f"R$ {total_rec:,.2f}", delta_color="inverse")
+                
+                col5.download_button(
                     label="📥 Baixar Excel",
                     data=to_excel(df_dash),
                     file_name=f'relatorio_{produto}.xlsx',
@@ -162,40 +181,45 @@ if has_data:
             # --- TABELA EQUIPE ---
             st.subheader("📊 Por Equipe")
             df_dash['% Efetividade'] = (df_dash['Concluido'] / df_dash['Volume'] * 100).fillna(0)
+            df_dash['% Em Andamento'] = (df_dash['EmAndamento'] / df_dash['Volume'] * 100).fillna(0)
             df_dash['% Recusa'] = (df_dash['Recusado'] / df_dash['Volume'] * 100).fillna(0)
             df_dash['% Repr. Empresa'] = (df_dash['Volume'] / total_vol * 100).fillna(0)
+            
             df_dash = df_dash.sort_values('Volume', ascending=False)
             
             st.dataframe(df_dash.style.format({
-                'Volume': 'R$ {:,.2f}', 'Concluido': 'R$ {:,.2f}', 'Recusado': 'R$ {:,.2f}',
-                '% Efetividade': '{:.2f}%', '% Recusa': '{:.2f}%', '% Repr. Empresa': '{:.2f}%'
+                'Volume': 'R$ {:,.2f}', 
+                'Concluido': 'R$ {:,.2f}', 
+                'EmAndamento': 'R$ {:,.2f}', 
+                'Recusado': 'R$ {:,.2f}',
+                '% Efetividade': '{:.2f}%', 
+                '% Em Andamento': '{:.2f}%',
+                '% Recusa': '{:.2f}%', 
+                '% Repr. Empresa': '{:.2f}%'
             }).background_gradient(subset=['% Efetividade'], cmap="Greens"), use_container_width=True)
             
-            # --- TABELA CONSULTOR (COM FILTRO NOVO) ---
+            # --- TABELA CONSULTOR ---
             st.divider()
             st.subheader("👤 Detalhe por Consultor")
             
-            # 1. Carrega todos os consultores do banco primeiro
+            # (CORRIGIDA: Adicionei a coluna EmAndamento aqui também)
             df_cons = pd.read_sql(f"""
                 SELECT 
                     equipe, operador,
                     SUM(valor_entrada) as Volume,
                     SUM(CASE WHEN status = 'Concluído' THEN valor_entrada ELSE 0 END) as Concluido,
+                    SUM(CASE WHEN status = 'Em Andamento' THEN valor_entrada ELSE 0 END) as EmAndamento,
                     SUM(CASE WHEN status = 'Recusado' THEN valor_entrada ELSE 0 END) as Recusado
                 FROM vendas WHERE produto = '{produto}'
                 GROUP BY equipe, operador ORDER BY equipe, Volume DESC
             """, conn)
             
-            # 2. Prepara o cálculo das porcentagens
             df_cons['% Efetividade'] = (df_cons['Concluido'] / df_cons['Volume'] * 100).fillna(0)
+            df_cons['% Em Andamento'] = (df_cons['EmAndamento'] / df_cons['Volume'] * 100).fillna(0)
             df_cons['% Recusa'] = (df_cons['Recusado'] / df_cons['Volume'] * 100).fillna(0)
             
-            # 3. O FILTRO DE EQUIPE (A MÁGICA AQUI)
-            # Pega lista única de equipes que existem nesse produto
+            # Filtro
             lista_equipes = df_cons['equipe'].unique()
-            
-            # Cria o componente multiselect
-            # default=lista_equipes faz com que comece com TODAS marcadas
             equipes_selecionadas = st.multiselect(
                 f"Filtrar Equipes ({produto}):",
                 options=lista_equipes,
@@ -203,16 +227,19 @@ if has_data:
                 placeholder="Selecione as equipes..."
             )
             
-            # Se o usuário limpar tudo, mostramos tudo (ou nada, se preferir tire o if)
             if not equipes_selecionadas:
-                df_filtrado = df_cons # Fallback: mostra tudo se estiver vazio
+                df_filtrado = df_cons
             else:
                 df_filtrado = df_cons[df_cons['equipe'].isin(equipes_selecionadas)]
 
-            # 4. Mostra a tabela filtrada
             st.dataframe(df_filtrado.style.format({
-                'Volume': 'R$ {:,.2f}', 'Concluido': 'R$ {:,.2f}', 'Recusado': 'R$ {:,.2f}',
-                '% Efetividade': '{:.2f}%', '% Recusa': '{:.2f}%'
+                'Volume': 'R$ {:,.2f}', 
+                'Concluido': 'R$ {:,.2f}', 
+                'EmAndamento': 'R$ {:,.2f}',
+                'Recusado': 'R$ {:,.2f}',
+                '% Efetividade': '{:.2f}%', 
+                '% Em Andamento': '{:.2f}%',
+                '% Recusa': '{:.2f}%'
             }), use_container_width=True)
 
 else:
