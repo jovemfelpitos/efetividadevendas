@@ -17,7 +17,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-DB_FILE = "vendas_final.db"
+DB_FILE = "vendas_multibase.db"
 
 # --- 2. FUNÇÕES DE SUPORTE ---
 def get_connection():
